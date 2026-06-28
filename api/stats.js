@@ -3,10 +3,7 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
-  // Handle preflight OPTIONS request
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
-  }
+  if (req.method === 'OPTIONS') return res.status(200).end();
 
   const { platform } = req.query;
 
@@ -23,13 +20,8 @@ export default async function handler(req, res) {
           }
         }
       );
-
-      if (!r.ok) {
-        throw new Error(`LeetCode API returned ${r.status}`);
-      }
-
+      if (!r.ok) throw new Error(`LeetCode API returned ${r.status}`);
       const data = await r.json();
-
       return res.json({
         totalSolved:  data.solvedProblem ?? 0,
         easySolved:   data.easySolved    ?? 0,
@@ -43,12 +35,8 @@ export default async function handler(req, res) {
 
     // =====================================================
     // TRYHACKME
-    // FIX: removed silent catch+fallback, switched endpoint,
-    //      added Referer header, added console logs for debugging
     // =====================================================
     if (platform === 'tryhackme') {
-      // THM's /api/v2/public-profile blocks server-side requests.
-      // /api/user/summary works without a browser cookie session.
       const r = await fetch(
         'https://tryhackme.com/api/user/summary?username=zororj',
         {
@@ -71,7 +59,6 @@ export default async function handler(req, res) {
       const json = await r.json();
       console.log('[THM] raw response:', JSON.stringify(json).slice(0, 500));
 
-      // Handle both response shapes THM may return
       const d = json.data ?? json;
 
       return res.json({
@@ -88,53 +75,50 @@ export default async function handler(req, res) {
 
     // =====================================================
     // HACK THE BOX
-    // FIX: better 401 message, owns count from activity endpoint,
-    //      correct field mapping, console logs for debugging
+    // FIX: uses the PUBLIC profile API — no token needed!
+    // Your profile is public at:
+    // https://app.hackthebox.com/public/users/3175444
     // =====================================================
     if (platform === 'hackthebox') {
-      const token = process.env.HTB_TOKEN;
-
-      if (!token) {
-        throw new Error('HTB_TOKEN env var not set');
-      }
-
-      // --- Basic profile ---
-      const profileRes = await fetch(
+      // Primary: public profile endpoint (no auth required)
+      const r = await fetch(
         'https://labs.hackthebox.com/api/v4/user/profile/basic/3175444',
         {
           headers: {
-            'Authorization': `Bearer ${token}`,
-            'Accept':        'application/json',
-            'User-Agent':    'Mozilla/5.0'
+            // Sending Accept header mimics an API client, not a browser
+            'Accept':     'application/json',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Referer':    'https://app.hackthebox.com/'
           }
         }
       );
 
-      console.log('[HTB] profile status:', profileRes.status);
+      console.log('[HTB] public profile status:', r.status);
 
-      if (profileRes.status === 401) {
-        return res.status(401).json({
-          error: 'HTB token expired. Regenerate at: https://app.hackthebox.com/profile/settings (App Tokens tab)'
+      // If public endpoint works (profile is public), use it
+      if (r.ok) {
+        const raw = await r.json();
+        console.log('[HTB] raw keys:', Object.keys(raw));
+        const p = raw.profile ?? raw;
+
+        return res.json({
+          level:      p.level      ?? 0,
+          rank:       p.rank       ?? 'N/A',
+          seasonRank: p.ranking    ? `#${p.ranking}` : 'N/A',
+          points:     p.points     ?? 0,
+          flags:      String(p.system_owns ?? p.user_owns ?? 0),
+          tier:       p.rank_text  ?? p.rank ?? 'N/A',
+          name:       p.name       ?? 'N/A',
+          avatar:     p.avatar     ?? null
         });
       }
 
-      if (!profileRes.ok) {
-        const body = await profileRes.text();
-        console.error('[HTB] profile error body:', body.slice(0, 300));
-        return res.status(500).json({ error: `HTB API returned ${profileRes.status}` });
-      }
-
-      const raw = await profileRes.json();
-      console.log('[HTB] raw profile keys:', Object.keys(raw));
-
-      // HTB wraps in { profile: { ... } }
-      const p = raw.profile ?? raw;
-
-      // --- Activity endpoint for accurate machine owns ---
-      let userOwns = p.system_owns ?? p.user_owns ?? 0;
-      try {
-        const actRes = await fetch(
-          'https://labs.hackthebox.com/api/v4/user/profile/activity/3175444',
+      // Fallback: use token if set (in case HTB changes public API access)
+      const token = process.env.HTB_TOKEN;
+      if (token) {
+        console.log('[HTB] public failed, trying token...');
+        const tr = await fetch(
+          'https://labs.hackthebox.com/api/v4/user/profile/basic/3175444',
           {
             headers: {
               'Authorization': `Bearer ${token}`,
@@ -144,36 +128,39 @@ export default async function handler(req, res) {
           }
         );
 
-        if (actRes.ok) {
-          const actData = await actRes.json();
-          const activity = actData.profile?.activity ?? actData.activity ?? [];
-          const machineOwns = activity.filter(a => a.object_type === 'machine').length;
-          if (machineOwns > 0) userOwns = machineOwns;
-          console.log('[HTB] machine owns from activity:', machineOwns);
-        } else {
-          console.warn('[HTB] activity endpoint returned:', actRes.status);
+        console.log('[HTB] token auth status:', tr.status);
+
+        if (tr.status === 401) {
+          return res.status(401).json({
+            error: 'HTB token expired. Regenerate at: https://app.hackthebox.com/profile/settings → App Tokens'
+          });
         }
-      } catch (actErr) {
-        console.warn('[HTB] activity fetch failed (non-fatal):', actErr.message);
+
+        if (tr.ok) {
+          const raw = await tr.json();
+          const p = raw.profile ?? raw;
+          return res.json({
+            level:      p.level      ?? 0,
+            rank:       p.rank       ?? 'N/A',
+            seasonRank: p.ranking    ? `#${p.ranking}` : 'N/A',
+            points:     p.points     ?? 0,
+            flags:      String(p.system_owns ?? p.user_owns ?? 0),
+            tier:       p.rank_text  ?? p.rank ?? 'N/A',
+            name:       p.name       ?? 'N/A',
+            avatar:     p.avatar     ?? null
+          });
+        }
       }
 
-      return res.json({
-        level:      p.level      ?? 0,
-        rank:       p.rank       ?? 'N/A',
-        seasonRank: p.ranking    ? `#${p.ranking}` : 'N/A',
-        points:     p.points     ?? 0,
-        flags:      String(userOwns),
-        tier:       p.rank_text  ?? p.rank ?? 'N/A',
-        name:       p.name       ?? 'N/A',
-        avatar:     p.avatar     ?? null
+      return res.status(500).json({
+        error: `HTB returned ${r.status}. Profile may not be public or token may be expired.`
       });
     }
 
-    // Unknown platform
     return res.status(400).json({ error: 'Unknown platform. Use: leetcode | tryhackme | hackthebox' });
 
   } catch (e) {
-    console.error(`[handler] ${platform} unhandled error:`, e.message);
+    console.error(`[handler] ${platform} error:`, e.message);
     return res.status(500).json({ error: e.message, platform });
   }
 }
